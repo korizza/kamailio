@@ -439,8 +439,56 @@ done:
 /* must be called with unlocked WSCONN_LOCK */
 int wsconn_put(ws_connection_t *wsc)
 {
-	return wsconn_put_mode(wsc, 1);
+	int destroy = 0;
+
+	LM_DBG("wsconn_put start for [%p] refcnt [%d]\n", wsc,
+			atomic_get(&wsc->refcnt));
+
+	if(!wsc)
+		return -1;
+
+	WSCONN_LOCK;
+	/* refcnt == 0*/
+	if(wsconn_unref(wsc)) {
+		/* Remove from the WebSocket used list */
+		if(wsconn_used_list->head == wsc)
+			wsconn_used_list->head = wsc->used_next;
+		if(wsconn_used_list->tail == wsc)
+			wsconn_used_list->tail = wsc->used_prev;
+		if(wsc->used_prev)
+			wsc->used_prev->used_next = wsc->used_next;
+		if(wsc->used_next)
+			wsc->used_next->used_prev = wsc->used_prev;
+
+		/* remove from wsconn_id_hash */
+		wsconn_listrm(wsconn_id_hash[wsc->id_hash], wsc, id_next, id_prev);
+
+		/* stat */
+		update_stat(ws_current_connections, -1);
+		if(wsc->sub_protocol == SUB_PROTOCOL_SIP)
+			update_stat(ws_sip_current_connections, -1);
+		else if(wsc->sub_protocol == SUB_PROTOCOL_MSRP)
+			update_stat(ws_msrp_current_connections, -1);
+
+		destroy = 1;
+	}
+	WSCONN_UNLOCK;
+
+	LM_DBG("wsconn_put end for [%p] refcnt [%d]\n", wsc,
+			atomic_get(&wsc->refcnt));
+
+	/* wsc is removed from all lists and can be destroyed safely */
+	if(destroy)
+		wsconn_dtor(wsc);
+
+	return 0;
 }
+
+/* must be called with unlocked WSCONN_LOCK */
+// int wsconn_put(ws_connection_t *wsc)
+// {
+// 	return wsconn_put_mode(wsc, 1);
+// }
 
 ws_connection_t *wsconn_get(int id)
 {
@@ -518,7 +566,7 @@ ws_connection_t **wsconn_get_list(void)
 
 	/* allocate a NULL terminated list of wsconn pointers */
 	list_size = (list_len + 1) * sizeof(ws_connection_t *);
-	list = pkg_malloc(list_size);
+	list = shm_malloc(list_size);
 	if(!list)
 		goto end;
 
@@ -569,7 +617,7 @@ int wsconn_put_list(ws_connection_t **list_head)
 		wsc = *(++list);
 	}
 
-	pkg_free(list_head);
+	shm_free(list_head);
 
 	return 0;
 }
